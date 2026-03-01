@@ -1,107 +1,107 @@
-package manifest
+package egmanifest
 
 import (
-	"encoding/binary"
-	"fmt"
+	"crypto/sha1"
 	"io"
 
-	"github.com/meszmate/manifest/binreader"
 	"github.com/google/uuid"
+
+	"github.com/bur4ky/egmanifest/binreader"
 )
 
-type FChunkDataList struct {
+// ChunkDataList represents the list of chunks defined in the manifest.
+type ChunkDataList struct {
 	DataSize    uint32
 	DataVersion uint8
 	Count       uint32
 
-	Chunks      []*Chunk
+	Elements    []Chunk
 	ChunkLookup map[uuid.UUID]uint32
 }
 
-type Chunk struct {
-	GUID       uuid.UUID
-	Hash       uint64
-	SHAHash    [20]byte
-	Group      uint8
-	WindowSize uint32
-	FileSize   uint64
-}
-
-// gets the URL for a chunk.
-// example for chunksDir: http://epicgames-download1.akamaized.net/Builds/Fortnite/CloudDir/ChunksV4
-func (c *Chunk) GetURL(chunksDir string) string {
-	return fmt.Sprintf("%s/%02d/%016X_%X.chunk", chunksDir, c.Group, c.Hash, c.GUID[:])
-}
-
-func ReadChunkDataList(f io.ReadSeeker) (*FChunkDataList, error) {
-	reader := binreader.NewReader(f, binary.LittleEndian)
-	var list FChunkDataList
+// ReadChunkDataList reads the chunk data list, then seeks past any remaining
+// bytes in the chunk data section based on the DataSize field.
+func ReadChunkDataList(reader *binreader.Reader) (*ChunkDataList, error) {
+	var list ChunkDataList
 	var err error
 
-	list.DataSize, err = reader.ReadUint32()
+	start := reader.Offset()
+	list.DataSize, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	list.DataVersion, err = reader.ReadUint8()
+	list.DataVersion, err = reader.Uint8()
 	if err != nil {
 		return nil, err
 	}
 
-	list.Count, err = reader.ReadUint32()
+	list.Count, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	list.Chunks = make([]*Chunk, list.Count)
-	// initialize all chunks
-	for i := uint32(0); i < list.Count; i++ {
-		list.Chunks[i] = &Chunk{}
-	}
-	list.ChunkLookup = map[uuid.UUID]uint32{}
+	list.Elements = make([]Chunk, list.Count)
+	list.ChunkLookup = make(map[uuid.UUID]uint32, list.Count)
 
-	for i, chunk := range list.Chunks {
-		chunk.GUID, err = reader.ReadGUID()
+	for i := range list.Count {
+		guid, err := reader.GUID()
 		if err != nil {
 			return nil, err
 		}
-		list.ChunkLookup[chunk.GUID] = uint32(i)
+
+		list.Elements[i].GUID = guid
+		list.ChunkLookup[guid] = i
 	}
 
-	for _, chunk := range list.Chunks {
-		chunk.Hash, err = reader.ReadUint64()
+	for i := range list.Count {
+		hash, err := reader.Uint64()
 		if err != nil {
 			return nil, err
 		}
+
+		list.Elements[i].Hash = hash
 	}
 
-	for _, chunk := range list.Chunks {
-		_, shaHash, err := reader.ReadBytes(20)
+	for i := range list.Count {
+		sha, err := reader.Bytes(sha1.Size)
 		if err != nil {
 			return nil, err
 		}
-		copy(chunk.SHAHash[:], shaHash)
+
+		list.Elements[i].SHAHash = [sha1.Size]byte(sha)
 	}
 
-	for _, chunk := range list.Chunks {
-		chunk.Group, err = reader.ReadUint8()
+	for i := range list.Count {
+		group, err := reader.Uint8()
 		if err != nil {
 			return nil, err
 		}
+
+		list.Elements[i].Group = group
 	}
 
-	for _, chunk := range list.Chunks {
-		chunk.WindowSize, err = reader.ReadUint32()
+	for i := range list.Count {
+		windowSize, err := reader.Uint32()
 		if err != nil {
 			return nil, err
 		}
+
+		list.Elements[i].WindowSize = windowSize
 	}
 
-	for _, chunk := range list.Chunks {
-		chunk.FileSize, err = reader.ReadUint64()
+	for i := range list.Count {
+		fileSize, err := reader.Uint64()
 		if err != nil {
 			return nil, err
 		}
+
+		list.Elements[i].FileSize = fileSize
+	}
+
+	_, err = reader.Seek(start+int64(list.DataSize), io.SeekStart)
+	if err != nil {
+		return nil, err
 	}
 
 	return &list, nil

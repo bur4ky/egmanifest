@@ -1,52 +1,93 @@
+// Package binreader provides a binary reader for reading various data types from a byte slice.
 package binreader
 
 import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"io/ioutil"
 	"math"
-
-	"github.com/google/uuid"
 )
 
-var (
-	ErrNegativeAmount = errors.New("negetive bytes count")
-)
-
-func NewReader(r io.ReadSeeker, order binary.ByteOrder) *Reader {
-	return &Reader{
-		r:     r,
-		order: order,
-	}
-}
-
+// Reader is a binary reader that reads from a byte slice. It implements io.ReadSeeker.
 type Reader struct {
-	r     io.ReadSeeker
-	order binary.ByteOrder
+	data []byte
+	off  int64
 }
 
-func (r *Reader) ReadAll() ([]byte, error) {
-	b, err := ioutil.ReadAll(r.r)
-	return b, err
+// New creates a new Reader for the given byte slice.
+func New(data []byte) *Reader {
+	return &Reader{data: data}
 }
-func (r *Reader) ReadBytes(count int) (n int, out []byte, err error) {
-	if count < 0 {
-		return 0, nil, ErrNegativeAmount
+
+// Offset returns the current offset of the reader.
+func (r *Reader) Offset() int64 {
+	return r.off
+}
+
+// Read reads up to len(p) bytes into p.
+func (r *Reader) Read(p []byte) (int, error) {
+	if r.off >= r.len() {
+		return 0, io.EOF
 	}
 
-	if count == 0 {
-		return 0, []byte{}, nil
-	}
-
-	out = make([]byte, count)
-	n, err = io.ReadFull(r.r, out)
-
-	return
+	n := copy(p, r.data[r.off:])
+	r.off += int64(n)
+	return n, nil
 }
 
-func (r *Reader) ReadUint8() (uint8, error) {
-	_, b, err := r.ReadBytes(1)
+// Seek sets the offset for the next Read to offset, interpreted according to whence.
+func (r *Reader) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		// unchanged
+	case io.SeekCurrent:
+		offset = r.off + offset
+	case io.SeekEnd:
+		offset = r.len() + offset
+	default:
+		return 0, errors.New("invalid whence")
+	}
+
+	if offset < 0 || offset > r.len() {
+		return 0, io.ErrUnexpectedEOF
+	}
+
+	r.off = offset
+	return offset, nil
+}
+
+// Peek reads n bytes without advancing the offset.
+func (r *Reader) Peek(n int) ([]byte, error) {
+	offset := r.off
+	b, err := r.Bytes(n)
+	if err != nil {
+		return nil, err
+	}
+
+	r.off = offset
+	return b, nil
+}
+
+// Bytes reads n bytes and advances the offset.
+func (r *Reader) Bytes(n int) ([]byte, error) {
+	if n < 0 || int64(n) > (r.len()-r.off) {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	start := r.off
+	r.off += int64(n)
+	return r.data[start:r.off], nil
+}
+
+// Bool reads a boolean value (1 byte) and returns true if it's non-zero.
+func (r *Reader) Bool() (bool, error) {
+	v, err := r.Uint8()
+	return v != 0, err
+}
+
+// Uint8 reads an unsigned 8-bit integer.
+func (r *Reader) Uint8() (uint8, error) {
+	b, err := r.Bytes(1)
 	if err != nil {
 		return 0, err
 	}
@@ -54,143 +95,81 @@ func (r *Reader) ReadUint8() (uint8, error) {
 	return b[0], nil
 }
 
-func (r *Reader) ReadBool() (bool, error) {
-	b, err := r.ReadByte()
-	return b != 0, err
-}
-
-func (r *Reader) ReadByte() (byte, error) {
-	return r.ReadUint8()
-}
-
-func (r *Reader) ReadUint16() (uint16, error) {
-	_, b, err := r.ReadBytes(2)
+// Uint16 reads an unsigned 16-bit integer.
+func (r *Reader) Uint16() (uint16, error) {
+	b, err := r.Bytes(2)
 	if err != nil {
 		return 0, err
 	}
 
-	return r.order.Uint16(b), nil
+	return binary.LittleEndian.Uint16(b), nil
 }
 
-func (r *Reader) ReadUint32() (uint32, error) {
-	_, b, err := r.ReadBytes(4)
+// Uint32 reads an unsigned 32-bit integer.
+func (r *Reader) Uint32() (uint32, error) {
+	b, err := r.Bytes(4)
 	if err != nil {
 		return 0, err
 	}
 
-	return r.order.Uint32(b), nil
+	return binary.LittleEndian.Uint32(b), nil
 }
 
-func (r *Reader) ReadUint64() (uint64, error) {
-	_, b, err := r.ReadBytes(8)
+// Uint64 reads an unsigned 64-bit integer.
+func (r *Reader) Uint64() (uint64, error) {
+	b, err := r.Bytes(8)
 	if err != nil {
 		return 0, err
 	}
 
-	return r.order.Uint64(b), nil
+	return binary.LittleEndian.Uint64(b), nil
 }
 
-func (r *Reader) ReadInt8() (int8, error) {
-	i, err := r.ReadUint8()
-	return int8(i), err
+// Int8 reads an unsigned 8-bit integer and returns it as a signed 8-bit integer.
+func (r *Reader) Int8() (int8, error) {
+	v, err := r.Uint8()
+	return int8(v), err
 }
 
-func (r *Reader) ReadInt16() (int16, error) {
-	i, err := r.ReadUint16()
-	return int16(i), err
+// Int16 reads an unsigned 16-bit integer and returns it as a signed 16-bit integer.
+func (r *Reader) Int16() (int16, error) {
+	v, err := r.Uint16()
+	return int16(v), err
 }
 
-func (r *Reader) ReadInt32() (int32, error) {
-	i, err := r.ReadUint32()
-	return int32(i), err
+// Int32 reads an unsigned 32-bit integer and returns it as a signed 32-bit integer.
+func (r *Reader) Int32() (int32, error) {
+	v, err := r.Uint32()
+	return int32(v), err
 }
 
-func (r *Reader) ReadInt64() (int64, error) {
-	i, err := r.ReadUint64()
-	return int64(i), err
+// Int64 reads an unsigned 64-bit integer and returns it as a signed 64-bit integer.
+func (r *Reader) Int64() (int64, error) {
+	v, err := r.Uint64()
+	return int64(v), err
 }
 
-func (r *Reader) ReadFloat32() (float32, error) {
-	b, err := r.ReadUint32()
+// Float32 reads a 32-bit float by reading its bits as a uint32 and converting it to float32.
+func (r *Reader) Float32() (float32, error) {
+	v, err := r.Uint32()
 	if err != nil {
 		return 0, err
 	}
 
-	return math.Float32frombits(b), nil
+	return math.Float32frombits(v), nil
 }
 
-func (r *Reader) ReadFloat64() (float64, error) {
-	b, err := r.ReadUint64()
+// Float64 reads a 64-bit float by reading its bits as a uint64 and converting it to float64.
+func (r *Reader) Float64() (float64, error) {
+	v, err := r.Uint64()
 	if err != nil {
 		return 0, err
 	}
 
-	return math.Float64frombits(b), nil
+	return math.Float64frombits(v), nil
 }
 
-func (r *Reader) Read(p []byte) (n int, err error) {
-	return r.r.Read(p)
-}
-
-func (r *Reader) Seek(offset int64, whence int) (int64, error) {
-	i, err := r.r.Seek(offset, whence)
-	return i, err
-}
-
-func (r *Reader) Peek(n int) ([]byte, error) {
-	bytesRead, b, err := r.ReadBytes(n)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = r.Seek(int64(-bytesRead), io.SeekCurrent) // go back
-	return b, err
-}
-
-// reads a FString (null-terminated string starting with the length) from r
-func (r *Reader) ReadFString() (string, error) {
-	size, err := r.ReadUint32()
-	if err != nil || size == 0 {
-		return "", err
-	}
-
-	_, buf, err := r.ReadBytes(int(size))
-	if err != nil {
-		return "", err
-	}
-	if buf[len(buf)-1] != 0x0 { // ensure it's null-terminated
-		return "", errors.New("string is not null terminated")
-	}
-	return string(buf[:len(buf)-1]), nil // avoid the null charecter while returning
-}
-
-// read an array of FStrings. they start wtih the length then the data
-func (r *Reader) ReadFStringArray() (out []string, err error) {
-	size, err := r.ReadUint32()
-	if err != nil {
-		return nil, err
-	}
-
-	for i := uint32(0); i < size; i++ {
-		fstr, err := r.ReadFString()
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, fstr)
-	}
-
-	return
-}
-
-// reads a GUID which is stored as 4 uint32 segments written in Big Endian
-func (r *Reader) ReadGUID() (guid uuid.UUID, err error) {
-	data := make([]uint32, 4)
-	err = binary.Read(r, binary.BigEndian, &data)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	for i, v := range data {
-		binary.LittleEndian.PutUint32(guid[i*4:(i+1)*4], v)
-	}
-	return
+// len returns the total length of the data in the reader.
+func (r *Reader) len() int64 {
+	return int64(len(r.data))
 }

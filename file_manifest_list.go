@@ -1,22 +1,37 @@
-package manifest
+package egmanifest
 
 import (
-	"encoding/binary"
+	"crypto/sha1"
 	"fmt"
 	"io"
 
-	"github.com/meszmate/manifest/binreader"
 	"github.com/google/uuid"
+
+	"github.com/bur4ky/egmanifest/binreader"
 )
 
-type FFileManifestList struct {
-	DataSize    		uint32
-	DataVersion 		uint8
-	Count       		uint32
+// FileManifestList contains the list of all files in the manifest.
+type FileManifestList struct {
+	DataSize    uint32
+	DataVersion uint8
+	Count       uint32
 
-	FileManifestList 	[]File
+	FileManifestList []FileManifest
 }
 
+// FileManifest describes a single file in the manifest.
+type FileManifest struct {
+	Filename      string
+	SymlinkTarget string
+	SHAHash       [sha1.Size]byte
+	FileMetaFlags FileMetaFlag
+	InstallTags   []string
+	FileSize      uint32
+	ChunkParts    []ChunkPart
+	MimeType      string
+}
+
+// ChunkPart describes a contiguous region within a chunk that contributes to a file's content.
 type ChunkPart struct {
 	DataSize   uint32
 	ParentGUID uuid.UUID
@@ -26,125 +41,148 @@ type ChunkPart struct {
 	Chunk *Chunk
 }
 
-//TODO: implement io.ReadSeeker on this
-type File struct {
-	FileName      	string
-	SymlinkTarget 	string
-	SHAHash       	[20]byte
-	FileMetaFlags 	uint8
-	InstallTags   	[]string
-	FileSize      	uint32
-
-	ChunkParts 	[]ChunkPart
-}
-
-func (f *FFileManifestList) GetFileByPath(p string) *File{
-	for _, i := range f.FileManifestList{
-		if i.FileName == p{
-			return &i
-		}
-	}
-	return nil
-}
-
-func ReadFileManifestList(f io.ReadSeeker, dataList *FChunkDataList) (*FFileManifestList, error) {
-	reader := binreader.NewReader(f, binary.LittleEndian)
-	var list FFileManifestList
+// ReadFileManifestList reads the file manifest list section,
+// resolves chunk references against the provided ChunkDataList,
+// then seeks past any remaining bytes based on the DataSize field.
+func ReadFileManifestList(reader *binreader.Reader, dataList *ChunkDataList) (*FileManifestList, error) {
+	var list FileManifestList
 	var err error
 
-	list.DataSize, err = reader.ReadUint32()
+	start := reader.Offset()
+	list.DataSize, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	list.DataVersion, err = reader.ReadUint8()
+	list.DataVersion, err = reader.Uint8()
 	if err != nil {
 		return nil, err
 	}
 
-	list.Count, err = reader.ReadUint32()
+	list.Count, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	list.FileManifestList = make([]File, list.Count)
+	list.FileManifestList = make([]FileManifest, list.Count)
 
-	for idx := range list.FileManifestList {
-		list.FileManifestList[idx].FileName, err = reader.ReadFString()
+	for i := range list.FileManifestList {
+		list.FileManifestList[i].Filename, err = reader.FString()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	for idx := range list.FileManifestList {
-		list.FileManifestList[idx].SymlinkTarget, err = reader.ReadFString()
+	for i := range list.FileManifestList {
+		list.FileManifestList[i].SymlinkTarget, err = reader.FString()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	for idx := range list.FileManifestList {
-		_, shaHash, err := reader.ReadBytes(20)
+	for i := range list.FileManifestList {
+		b, err := reader.Bytes(sha1.Size)
 		if err != nil {
 			return nil, err
 		}
-		copy(list.FileManifestList[idx].SHAHash[:], shaHash)
+
+		list.FileManifestList[i].SHAHash = [sha1.Size]byte(b)
 	}
 
-	for idx := range list.FileManifestList {
-		list.FileManifestList[idx].FileMetaFlags, err = reader.ReadUint8()
+	for i := range list.FileManifestList {
+		flags, err := reader.Uint8()
+		if err != nil {
+			return nil, err
+		}
+
+		list.FileManifestList[i].FileMetaFlags = FileMetaFlag(flags)
+	}
+
+	for i := range list.FileManifestList {
+		list.FileManifestList[i].InstallTags, err = reader.FStringArray()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	for idx := range list.FileManifestList {
-		list.FileManifestList[idx].InstallTags, err = reader.ReadFStringArray()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	for idx := range list.FileManifestList {
-		chunkPartsSize, err := reader.ReadUint32()
+	for i := range list.FileManifestList {
+		chunkPartsSize, err := reader.Uint32()
 		if err != nil {
 			return nil, err
 		}
 
-		list.FileManifestList[idx].ChunkParts = make([]ChunkPart, chunkPartsSize)
+		fm := &list.FileManifestList[i]
+		fm.ChunkParts = make([]ChunkPart, chunkPartsSize)
 
-		for cpIdx := range list.FileManifestList[idx].ChunkParts {
-			list.FileManifestList[idx].ChunkParts[cpIdx].DataSize, err = reader.ReadUint32()
+		var fileSize uint32
+		for c := range fm.ChunkParts {
+			cp := &fm.ChunkParts[c]
+
+			cp.DataSize, err = reader.Uint32()
 			if err != nil {
 				return nil, err
 			}
-			list.FileManifestList[idx].ChunkParts[cpIdx].ParentGUID, err = reader.ReadGUID()
+
+			cp.ParentGUID, err = reader.GUID()
 			if err != nil {
 				return nil, err
 			}
-			chunkID, ok := dataList.ChunkLookup[list.FileManifestList[idx].ChunkParts[cpIdx].ParentGUID]
+
+			idx, ok := dataList.ChunkLookup[cp.ParentGUID]
 			if !ok {
-				return nil, fmt.Errorf("in chunkPart %d for file %d: parent GUID (%s) not found", cpIdx, idx, list.FileManifestList[idx].ChunkParts[cpIdx].ParentGUID.String())
+				return nil, fmt.Errorf("chunk GUID %s not found", cp.ParentGUID)
 			}
-			list.FileManifestList[idx].ChunkParts[cpIdx].Chunk = dataList.Chunks[chunkID]
 
-			list.FileManifestList[idx].ChunkParts[cpIdx].Offset, err = reader.ReadUint32()
+			cp.Chunk = &dataList.Elements[idx]
+
+			cp.Offset, err = reader.Uint32()
 			if err != nil {
 				return nil, err
 			}
-			list.FileManifestList[idx].ChunkParts[cpIdx].Size, err = reader.ReadUint32()
+
+			cp.Size, err = reader.Uint32()
+			if err != nil {
+				return nil, err
+			}
+
+			fileSize += cp.Size
+		}
+
+		fm.FileSize = fileSize
+	}
+
+	if list.DataVersion >= 2 {
+		for range list.Count {
+			a, err := reader.Int32()
+			if err != nil {
+				return nil, err
+			}
+
+			_, err = reader.Seek(int64(a)*16, io.SeekCurrent)
 			if err != nil {
 				return nil, err
 			}
 		}
 
-	}
-	for idx := range list.FileManifestList {
-		DataSize := 0 
-		for cidx := range list.FileManifestList[idx].ChunkParts{
-			DataSize += int(list.FileManifestList[idx].ChunkParts[cidx].Size)
+		for i := range list.Count {
+			list.FileManifestList[i].MimeType, err = reader.FString()
+			if err != nil {
+				return nil, err
+			}
 		}
-		list.FileManifestList[idx].FileSize = uint32(DataSize)
+
+		for range list.Count {
+			_, err = reader.Seek(32, io.SeekCurrent)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
+
+	_, err = reader.Seek(start+int64(list.DataSize), io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
 	return &list, nil
 }
