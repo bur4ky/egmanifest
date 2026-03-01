@@ -1,57 +1,64 @@
-package manifest
+package egmanifest
 
 import (
-	"encoding/binary"
 	"io"
 
-	"github.com/meszmate/manifest/binreader"
+	"github.com/bur4ky/egmanifest/binreader"
 )
 
-type FCustomFields struct {
+// CustomFields contains key-value metadata pairs from the manifest.
+type CustomFields struct {
 	DataSize    uint32
 	DataVersion uint8
 	Count       uint32
 	Fields      map[string]string
 }
 
-func ReadCustomFields(f io.ReadSeeker) (*FCustomFields, error) {
-	reader := binreader.NewReader(f, binary.LittleEndian)
-	var fields FCustomFields
+// ReadCustomFields reads the custom fields, then seeks past any remaining
+// bytes in the custom fields section based on the DataSize field.
+func ReadCustomFields(reader *binreader.Reader) (*CustomFields, error) {
+	var cf CustomFields
 	var err error
 
-	fields.DataSize, err = reader.ReadUint32()
+	start := reader.Offset()
+	cf.DataSize, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	fields.DataVersion, err = reader.ReadUint8()
+	cf.DataVersion, err = reader.Uint8()
 	if err != nil {
 		return nil, err
 	}
 
-	fields.Count, err = reader.ReadUint32()
+	cf.Count, err = reader.Uint32()
 	if err != nil {
 		return nil, err
 	}
 
-	fields.Fields = map[string]string{}
+	cf.Fields = make(map[string]string, cf.Count)
 
-	// store the keys for the second iteration
-	firstHalf := make([]string, fields.Count)
-	for idx := range firstHalf {
-		firstHalf[idx], err = reader.ReadFString()
+	keys := make([]string, cf.Count)
+	for i := range cf.Count {
+		keys[i], err = reader.FString()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// map indexs to keys and use them to build the map
-	for idx := range firstHalf {
-		fields.Fields[firstHalf[idx]], err = reader.ReadFString()
+	for i := range cf.Count {
+		val, err := reader.FString()
 		if err != nil {
 			return nil, err
 		}
+
+		cf.Fields[keys[i]] = val
 	}
 
-	return &fields, nil
+	_, err = reader.Seek(start+int64(cf.DataSize), io.SeekStart)
+	if err != nil {
+		return nil, err
+	}
+
+	return &cf, nil
 }
